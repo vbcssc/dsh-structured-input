@@ -1,0 +1,46 @@
+{
+  "name": "dsh-structured-input",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "结构化输入：点击输入框工具栏按钮，把当前会话上下文 + 你的需求嚼碎，按模板生成结构化提示词（DSH 插件）。",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "structured-prompt",
+    "context"
+  ],
+  "license": "MIT"
+}
