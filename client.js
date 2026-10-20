@@ -67,6 +67,15 @@ window.__ModuleLoader__.load({
         hint: '把你的需求 + 当前会话上下文，按模板嚼成结构化提示词。',
         placeholder: '说清楚要干什么。上下文会自动带上，不用重复前文。',
         template: '模板',
+        contextLabel: '上下文',
+        contextPresets: {
+          off: '不带上文',
+          brief: '最近 5 条',
+          standard: '最近 10 条',
+          deep: '最近 20 条',
+          full: '尽可能多',
+        },
+        contextPresetHint: '带上多少会话历史用来理解「刚才那个」之类的指代',
         generate: '生成',
         generating: '生成中',
         regenerate: '重新生成',
@@ -90,7 +99,8 @@ window.__ModuleLoader__.load({
           'session-not-live': '会话尚未就绪',
           'derive-failed': '历史解析失败',
           'empty-history': '这是第一条消息',
-          'budget-too-small': '历史太长，但上下文预算太小，一条都没装下',
+          'preset-off': '已关闭上下文（只发送当前需求）',
+          'budget-too-small': '历史太长，但上下文档位太小，一条都没装下',
         },
         degraded: '模型没按模板返回结构，下面是原文骨架，请自行整理',
         missing: (list) => `这些小节模型没给：${list}`,
@@ -293,6 +303,8 @@ window.__ModuleLoader__.load({
           active: false,
           draft: '',
           templateId: '',
+          /** 上下文档位 id。空串表示"跟 host 的默认档"，host 会收敛到默认值。 */
+          contextPreset: '',
           phase: 'idle',
           result: null,
           error: '',
@@ -306,6 +318,7 @@ window.__ModuleLoader__.load({
           close: (draft) => { draft.active = false; draft.error = ''; draft.previewOpen = false },
           setDraft: (draft, value) => { draft.draft = value },
           setTemplate: (draft, value) => { draft.templateId = value },
+          setContextPreset: (draft, value) => { draft.contextPreset = value },
           togglePreview: (draft) => { draft.previewOpen = !draft.previewOpen },
           start: (draft) => {
             draft.phase = 'working'
@@ -397,6 +410,7 @@ window.__ModuleLoader__.load({
         const active = read((state) => state.active)
         const draft = read((state) => state.draft)
         const templateId = read((state) => state.templateId)
+        const contextPreset = read((state) => state.contextPreset)
         const phase = read((state) => state.phase)
         const result = read((state) => state.result)
         const error = read((state) => state.error)
@@ -500,6 +514,21 @@ window.__ModuleLoader__.load({
           : (hasTemplate(hostState && hostState.templateId)
             ? hostState.templateId
             : (templates.length > 0 ? templates[0].id : ''))
+        // 上下文档位清单由 host 下发（`state.context.presets`），客户端只负责显示。
+        // host 没给清单时用空数组：下拉渲染成"不可用"，而不是自己编一份可能与
+        // host 对不上的档位表。
+        const presets = hostState && hostState.context && Array.isArray(hostState.context.presets)
+          ? hostState.context.presets
+          : []
+        const hasPreset = (id) => typeof id === 'string' && id.length > 0
+          && presets.some((item) => item.id === id)
+        // 与模板同样的三级兜底：store → host 默认档 → 列表第一项。
+        // 空串直接传给 host 也行（host 会收敛），但那样下拉会显示空白。
+        const effectivePreset = hasPreset(contextPreset)
+          ? contextPreset
+          : (hasPreset(hostState && hostState.context && hostState.context.preset)
+            ? hostState.context.preset
+            : (presets.length > 0 ? presets[0].id : ''))
         const working = phase === 'working'
         const waited = startedAtRef.current > 0
           ? Math.max(0, Math.round((nowMs - startedAtRef.current) / 1000))
@@ -575,6 +604,7 @@ window.__ModuleLoader__.load({
                   sessionId,
                   text,
                   templateId: effectiveTemplate,
+                  contextPreset: effectivePreset,
                 }),
                 ...(controller ? { signal: controller.signal } : {}),
               })
@@ -672,6 +702,21 @@ window.__ModuleLoader__.load({
                 onClick: () => actions.togglePreview(),
               }, previewOpen ? t('previewHide') : t('previewShow'))
               : null),
+          // 上下文档位：带上多少会话历史。放在模板下面一行、而不是挤进同一行 ——
+          // 两个下拉挨着时，用户会以为它们是一组关联设置；而它们其实互相独立
+          // （换模板不必重选上下文）。
+          h('div', { className: 'si-row' },
+            h('span', { className: 'si-label' }, t('contextLabel')),
+            h('select', {
+              className: 'si-select',
+              title: t('contextPresetHint'),
+              value: effectivePreset,
+              disabled: working || presets.length === 0,
+              onChange: (event) => actions.setContextPreset(event.target.value),
+            }, presets.length === 0
+              ? h('option', { key: 'none', value: '' }, t('templateUnavailable'))
+              : presets.map((preset) => h('option', { key: preset.id, value: preset.id },
+                t('contextPresets')[preset.id] || preset.id)))),
           preview,
           h('textarea', {
             className: 'si-textarea',

@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { composeUserContent, messageText, projectTranscript, DEFAULT_MAX_CHARS } from '../lib/context.js'
+import {
+  CONTEXT_PRESETS,
+  DEFAULT_CONTEXT_PRESET,
+  DEFAULT_MAX_CHARS,
+  composeUserContent,
+  messageText,
+  presetForMaxChars,
+  projectTranscript,
+  resolveContextPreset,
+} from '../lib/context.js'
 
 /** 造一条消息。 */
 const msg = (role, text) => ({ role, content: [{ type: 'text', text }] })
@@ -125,4 +134,67 @@ test('messageText 不把原型链成员名当已知角色', () => {
   assert.doesNotMatch(line, /native code/)
   const line2 = messageText({ role: 'toString', content: [{ type: 'text', text: 'b' }] })
   assert.equal(line2, '【toString】b')
+})
+
+/* ───────────── 上下文档位 ───────────── */
+
+test('resolveContextPreset 未知 id 回落到默认档，不是 off', () => {
+  assert.equal(resolveContextPreset('brief').id, 'brief')
+  assert.equal(resolveContextPreset('deep').maxMessages, 20)
+  // 拼错档位名不该等于"关掉上下文"：那会让用户以为插件读不懂他。
+  assert.equal(resolveContextPreset('nonsense').id, DEFAULT_CONTEXT_PRESET)
+  assert.equal(resolveContextPreset(undefined).id, DEFAULT_CONTEXT_PRESET)
+  assert.equal(resolveContextPreset(null).id, DEFAULT_CONTEXT_PRESET)
+  assert.equal(resolveContextPreset(42).id, DEFAULT_CONTEXT_PRESET)
+})
+
+test('档位清单 id 唯一，且默认档在清单里', () => {
+  const ids = CONTEXT_PRESETS.map((preset) => preset.id)
+  assert.equal(new Set(ids).size, ids.length, '档位 id 不能重复')
+  assert.ok(ids.includes(DEFAULT_CONTEXT_PRESET), '默认档必须真的存在于清单里')
+  // 预算从低到高单调：下拉里的顺序就是"带得越来越多"。
+  const budgets = CONTEXT_PRESETS.filter((preset) => preset.id !== 'off').map((preset) => preset.maxChars)
+  assert.deepEqual(budgets, [...budgets].sort((a, b) => a - b))
+})
+
+test('presetForMaxChars 把旧配置的字符预算迁移到最近档位', () => {
+  assert.equal(presetForMaxChars(12000).id, 'standard', '12000 正好是 standard')
+  assert.equal(presetForMaxChars(6000).id, 'standard', '向上取最近一档，预算不缩水')
+  assert.equal(presetForMaxChars(100).id, 'brief')
+  assert.equal(presetForMaxChars(0).id, 'off')
+  assert.equal(presetForMaxChars(-1).id, 'off')
+  assert.equal(presetForMaxChars(999999).id, 'full')
+})
+
+test('projectTranscript 遵守条数上限', () => {
+  const messages = []
+  for (let i = 0; i < 20; i += 1) messages.push(msg('user', `第${i}条`))
+  const result = projectTranscript(messages, { maxChars: 100000, maxMessages: 5 })
+  assert.equal(result.usedMessages, 5)
+  assert.equal(result.omittedMessages, 15)
+  assert.equal(result.limitedBy, 'messages')
+  // 保留的必须是最新的 5 条。
+  assert.match(result.text, /第19条/)
+  assert.doesNotMatch(result.text, /第14条/)
+})
+
+test('projectTranscript 字符预算优先时 limitedBy 是 chars', () => {
+  const messages = []
+  for (let i = 0; i < 20; i += 1) messages.push(msg('user', '字'.repeat(50)))
+  const result = projectTranscript(messages, { maxChars: 300, maxMessages: 10 })
+  assert.equal(result.limitedBy, 'chars')
+  assert.ok(result.usedMessages < 10, '字符预算应该先挡住')
+})
+
+test('projectTranscript 两个上限都没碰到时 limitedBy 为 null', () => {
+  const result = projectTranscript([msg('user', 'a'), msg('assistant', 'b')], { maxChars: 1000, maxMessages: 10 })
+  assert.equal(result.limitedBy, null)
+  assert.equal(result.omittedMessages, 0)
+})
+
+test('projectTranscript maxMessages 不破坏单条超预算的保底', () => {
+  const huge = [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(5000) }] }]
+  const result = projectTranscript(huge, { maxChars: 100, maxMessages: 1 })
+  assert.equal(result.usedMessages, 1, '最新一条仍要保住')
+  assert.ok(result.chars <= 100)
 })

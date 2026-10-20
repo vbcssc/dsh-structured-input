@@ -25,9 +25,15 @@
  */
 
 import { buildStructured, describeTemplate } from './lib/format.js'
-import { composeUserContent, projectTranscript } from './lib/context.js'
+import {
+  CONTEXT_PRESETS,
+  composeUserContent,
+  projectTranscript,
+  resolveContextPreset,
+} from './lib/context.js'
 import {
   DEFAULTS,
+  contextPresetOf,
   dataDirectory,
   pickTemplate,
   resolvePrompt,
@@ -175,13 +181,31 @@ export function resolveRoute(ctx, configured, session) {
  *
  * @param {object} ctx cordis 上下文。
  * @param {string} sessionId 会话 id。
- * @param {number} maxChars 字符预算。
- * @returns {{ used: boolean, reason: string|null, messages: number, omitted: number, chars: number, text: string, session: object|null }}
+ * @param {string|{ id?: string, maxChars?: number, maxMessages?: number }} preset
+ *   上下文档位 id，或直接给一份预算。未知 id 回落到默认档。
+ * @returns {{ used: boolean, reason: string|null, messages: number, omitted: number, chars: number, preset: string, maxChars: number, maxMessages: number, limitedBy: string|null, text: string, session: object|null }}
  */
-export function readContext(ctx, sessionId, maxChars) {
-  const empty = { used: false, reason: null, messages: 0, omitted: 0, chars: 0, text: '', session: null }
+export function readContext(ctx, sessionId, preset) {
+  const resolved = resolvePresetSpec(preset)
+  const empty = {
+    used: false,
+    reason: null,
+    messages: 0,
+    omitted: 0,
+    chars: 0,
+    preset: resolved.id,
+    maxChars: resolved.maxChars,
+    maxMessages: resolved.maxMessages,
+    limitedBy: null,
+    text: '',
+    session: null,
+  }
   if (typeof sessionId !== 'string' || sessionId.length === 0) {
     return { ...empty, reason: 'no-session-id' }
+  }
+  // `off` 档不是"读不到上下文"，是用户明确要求不带 —— 连会话都不用取。
+  if (resolved.maxChars <= 0 || resolved.maxMessages <= 0) {
+    return { ...empty, reason: 'preset-off' }
   }
   const sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : null
   if (!sessions || typeof sessions.get !== 'function') {
@@ -201,9 +225,12 @@ export function readContext(ctx, sessionId, maxChars) {
   } catch {
     return { ...empty, reason: 'derive-failed', session }
   }
-  const projected = projectTranscript(messages, { maxChars })
+  const projected = projectTranscript(messages, {
+    maxChars: resolved.maxChars,
+    maxMessages: resolved.maxMessages,
+  })
   // "没有历史"和"历史有东西但被预算卡没了"是两回事，用户看到的提示不同、
-  // 排查方向也不同：前者正常，后者说明 context.maxChars 配得太小。
+  // 排查方向也不同：前者正常，后者说明档位太小或条数太少。
   const hasAnyMessage = messages.length > 0
   return {
     used: projected.usedMessages > 0,
@@ -213,9 +240,32 @@ export function readContext(ctx, sessionId, maxChars) {
     messages: projected.usedMessages,
     omitted: projected.omittedMessages,
     chars: projected.chars,
+    preset: resolved.id,
+    maxChars: resolved.maxChars,
+    maxMessages: resolved.maxMessages,
+    limitedBy: projected.limitedBy,
     text: projected.text,
     session,
   }
+}
+
+/**
+ * 把档位 id / 直接预算 / 缺省值统一成一份预算。
+ * @param {unknown} preset 请求里的档位，或配置里的预算。
+ * @returns {{ id: string, maxChars: number, maxMessages: number }} 预算。
+ */
+export function resolvePresetSpec(preset) {
+  if (preset && typeof preset === 'object') {
+    const id = resolveContextPreset(preset.id).id
+    const base = resolveContextPreset(id)
+    return {
+      id,
+      // 调用方显式给的数字优先（测试与将来的高级配置用得上），否则按档位。
+      maxChars: Number.isFinite(preset.maxChars) ? preset.maxChars : base.maxChars,
+      maxMessages: Number.isFinite(preset.maxMessages) ? preset.maxMessages : base.maxMessages,
+    }
+  }
+  return resolveContextPreset(preset)
 }
 
 /**
@@ -325,7 +375,7 @@ function autoMaxTokens(chars) {
  *
  * @param {object} ctx cordis 上下文。
  * @param {object} state 当前状态。
- * @param {{ sessionId?: string, text?: string, templateId?: string }} input 请求。
+ * @param {{ sessionId?: string, text?: string, templateId?: string, contextPreset?: string }} input 请求。
  * @returns {Promise<object>} 响应体。
  */
 export async function generate(ctx, state, input) {
@@ -340,7 +390,12 @@ export async function generate(ctx, state, input) {
     return { ok: false, error: 'no templates available: check lib/templates.json' }
   }
 
-  const context = readContext(ctx, input.sessionId, state.context.maxChars)
+  // 弹窗里的档位是**按次**的：不选就用状态里的默认档。非法值由
+  // `resolveContextPreset` 收敛到默认档，不会让一次手滑的请求悄悄不带上下文。
+  const preset = typeof input.contextPreset === 'string' && input.contextPreset.length > 0
+    ? input.contextPreset
+    : contextPresetOf(state)
+  const context = readContext(ctx, input.sessionId, preset)
   const route = resolveRoute(ctx, state.llm, context.session)
   const prompt = resolvePrompt()
 
@@ -376,11 +431,26 @@ export async function generate(ctx, state, input) {
         messages: context.messages,
         omitted: context.omitted,
         chars: context.chars,
+        preset: context.preset,
+        maxChars: context.maxChars,
+        maxMessages: Number.isFinite(context.maxMessages) ? context.maxMessages : 0,
+        limitedBy: context.limitedBy,
       },
     }
   }
 
   const built = buildStructured(raw, template)
+  const contextInfo = {
+    used: context.used,
+    reason: context.reason,
+    messages: context.messages,
+    omitted: context.omitted,
+    chars: context.chars,
+    preset: context.preset,
+    maxChars: context.maxChars,
+    maxMessages: Number.isFinite(context.maxMessages) ? context.maxMessages : 0,
+    limitedBy: context.limitedBy,
+  }
   return {
     ok: true,
     text: built.text,
@@ -390,13 +460,7 @@ export async function generate(ctx, state, input) {
     template: { id: template.id, name: template.name },
     route,
     promptSource: prompt.source,
-    context: {
-      used: context.used,
-      reason: context.reason,
-      messages: context.messages,
-      omitted: context.omitted,
-      chars: context.chars,
-    },
+    context: contextInfo,
   }
 }
 
@@ -411,7 +475,16 @@ export function publicState(state, templates) {
   return {
     enabled: state.enabled,
     templateId: state.templateId,
-    context: { ...state.context },
+    context: {
+      ...state.context,
+      // 档位清单由 host 下发，客户端不自己写一份：两边各写一份迟早会漂移，
+      // 表现为下拉里有个选项，选中后 host 却回落到默认档。
+      presets: CONTEXT_PRESETS.map((preset) => ({
+        id: preset.id,
+        maxChars: preset.maxChars,
+        maxMessages: Number.isFinite(preset.maxMessages) ? preset.maxMessages : 0,
+      })),
+    },
     llm: { ...state.llm },
     stats: { ...state.stats },
     revision: state.revision,
@@ -627,6 +700,7 @@ export function apply(ctx, config) {
           sessionId: typeof body.sessionId === 'string' ? body.sessionId : '',
           text: typeof body.text === 'string' ? body.text : '',
           templateId: typeof body.templateId === 'string' ? body.templateId : state.templateId,
+          contextPreset: typeof body.contextPreset === 'string' ? body.contextPreset : '',
           ...(controller ? { signal: controller.signal } : {}),
         })
 

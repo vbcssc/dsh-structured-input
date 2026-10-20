@@ -165,7 +165,14 @@ test('状态路由：GET 返回模板清单与状态', async () => {
     assert.equal(data.ok, true)
     assert.ok(Array.isArray(data.state.templates.items))
     assert.ok(data.state.templates.items.length > 0)
-    assert.equal(typeof data.state.context.maxChars, 'number')
+    assert.equal(typeof data.state.context.preset, 'string', '应下发当前上下文档位')
+    assert.ok(Array.isArray(data.state.context.presets), '应下发档位清单，客户端不自己写一份')
+    assert.ok(data.state.context.presets.length > 0)
+    for (const preset of data.state.context.presets) {
+      assert.equal(typeof preset.id, 'string')
+      assert.equal(typeof preset.maxChars, 'number')
+      assert.equal(typeof preset.maxMessages, 'number')
+    }
   })
 })
 
@@ -236,5 +243,112 @@ test('未知路径返回 404（handler 未注册时不崩）', async () => {
   await withServer({}, async (base) => {
     const res = await fetch(`${base}/plugins/dsh-structured-input/nope`, { method: 'POST' })
     assert.equal(res.status, 404)
+  })
+})
+
+/* ───────────── 上下文档位 ───────────── */
+
+/** 造一个有历史的假会话。 */
+function fakeSessions(count) {
+  const messages = []
+  for (let i = 0; i < count; i += 1) {
+    messages.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: [{ type: 'text', text: `第${i}条对话` }] })
+  }
+  return {
+    get(id) {
+      if (id !== 's-live') return null
+      return {
+        deriveMessages: () => messages,
+        requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+      }
+    },
+  }
+}
+
+/** 发起一次生成并返回响应体。 */
+async function generateWith(base, body) {
+  return (await fetch(`${base}${GENERATE_ROUTE}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: '干活', ...body }),
+  })).json()
+}
+
+test('生成路由：请求里的 contextPreset 覆盖默认档', async () => {
+  await withServer({ sessions: fakeSessions(30), llm: fakeLlm([
+    { type: 'text-delta', index: 0, text: '{"目标":"做A"}' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]) }, async (base) => {
+    const brief = await generateWith(base, { sessionId: 's-live', contextPreset: 'brief' })
+    assert.equal(brief.ok, true)
+    assert.equal(brief.context.preset, 'brief')
+    assert.equal(brief.context.messages, 5, 'brief 档是最近 5 条')
+    assert.equal(brief.context.limitedBy, 'messages', '应说明是条数先到上限')
+
+    const deep = await generateWith(base, { sessionId: 's-live', contextPreset: 'deep' })
+    assert.equal(deep.context.messages, 20, 'deep 档是最近 20 条')
+    assert.ok(deep.context.messages > brief.context.messages)
+  })
+})
+
+test('生成路由：off 档完全不读历史，也不调用 sessions', async () => {
+  let touched = false
+  const sessions = {
+    get() { touched = true; return null },
+  }
+  await withServer({ sessions, llm: fakeLlm([
+    { type: 'text-delta', index: 0, text: '{"目标":"做A"}' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]) }, async (base) => {
+    const data = await generateWith(base, { sessionId: 's-live', contextPreset: 'off' })
+    assert.equal(data.ok, true)
+    assert.equal(data.context.used, false)
+    assert.equal(data.context.reason, 'preset-off')
+    assert.equal(touched, false, 'off 档不应去碰会话服务')
+  })
+})
+
+test('生成路由：非法 preset 回落到默认档，而不是悄悄不带上文', async () => {
+  await withServer({ sessions: fakeSessions(30), llm: fakeLlm([
+    { type: 'text-delta', index: 0, text: '{"目标":"做A"}' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]) }, async (base) => {
+    const data = await generateWith(base, { sessionId: 's-live', contextPreset: 'nonsense' })
+    assert.equal(data.context.preset, 'standard')
+    assert.ok(data.context.messages > 0, '拼错档位名不该等于关掉上下文')
+  })
+})
+
+test('生成路由：预设档位真的会送进模型', async () => {
+  let userContent = ''
+  const llm = {
+    async *stream(options) {
+      userContent = options.messages[0].content[0].text
+      yield { type: 'text-delta', index: 0, text: '{"目标":"做A"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  await withServer({ sessions: fakeSessions(30), llm }, async (base) => {
+    await generateWith(base, { sessionId: 's-live', contextPreset: 'brief' })
+    assert.match(userContent, /第29条对话/, '最近一条必须在')
+    assert.doesNotMatch(userContent, /第5条对话/, '预算之外的老消息不应出现')
+  })
+})
+
+test('状态路由：可持久化 context.preset，乱写的值被规整', async () => {
+  await withServer({}, async (base) => {
+    const saved = await (await fetch(`${base}${STATE_ROUTE}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: { context: { preset: 'deep' } } }),
+    })).json()
+    assert.equal(saved.state.context.preset, 'deep')
+
+    const bad = await (await fetch(`${base}${STATE_ROUTE}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ state: { context: { preset: 'nope' } } }),
+    })).json()
+    assert.equal(bad.state.context.preset, 'standard', '非法档位应回落默认值')
   })
 })
