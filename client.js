@@ -83,6 +83,7 @@ window.__ModuleLoader__.load({
         copied: '已复制',
         copyFailed: '复制失败（浏览器拒绝了剪贴板访问）',
         templateUnavailable: '（模板不可用）',
+        presetUnavailable: '（宿主未提供档位）',
         previewShow: '看模板',
         previewHide: '收起',
         previewHint: '展开看看这个模板会要你填哪些内容',
@@ -714,7 +715,9 @@ window.__ModuleLoader__.load({
               disabled: working || presets.length === 0,
               onChange: (event) => actions.setContextPreset(event.target.value),
             }, presets.length === 0
-              ? h('option', { key: 'none', value: '' }, t('templateUnavailable'))
+              // 不能说「模板不可用」：这里是上下文档位，模板可能好好的。
+              // 真实成因几乎总是宿主还是旧版本（旧版不下发 `context.presets`）。
+              ? h('option', { key: 'none', value: '' }, t('presetUnavailable'))
               : presets.map((preset) => h('option', { key: preset.id, value: preset.id },
                 t('contextPresets')[preset.id] || preset.id)))),
           preview,

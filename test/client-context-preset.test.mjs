@@ -174,4 +174,6 @@ test('host 没下发档位清单时下拉禁用且不编造选项', async () => 
   assert.equal(select.props.disabled, true, '没有清单时应禁用')
   assert.equal(select.children.length, 1, '不应自己编一份档位表')
   assert.equal(select.props.value, '', '选中值必须是选项里真实存在的值')
+  // 占位文案不能说成「模板不可用」——那是另一个下拉的事，用户会以为是模板坏了。
+  assert.equal(select.children[0].children[0], '（宿主未提供档位）')
 })
